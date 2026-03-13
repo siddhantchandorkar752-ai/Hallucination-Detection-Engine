@@ -17,7 +17,7 @@
 
 <br/>
 
-🔴 **[Try the Live Demo →](YOUR_STREAMLIT_URL_HERE)**
+🔴 **[Try the Live Demo →](https://hallucination-detection-engine-siddhantchandorkar752.streamlit.app/)**
 
 </div>
 
