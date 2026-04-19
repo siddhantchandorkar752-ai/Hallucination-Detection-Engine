@@ -93,7 +93,9 @@ def verify_claim(claim: str, evidence: str, mode: str = "General") -> dict:
             )},
             {"role": "user", "content": (
                 f"Fact-check this claim:\n\nCLAIM: {claim}\n\n"
-                f"EVIDENCE: {evidence if evidence and evidence.strip() else 'No web evidence. Use your knowledge.'}\n\n"
+                f"EVIDENCE: {evidence if evidence and evidence.strip() else "No web evidence available."}
+
+ADDITIONAL INSTRUCTION: Even without evidence, use your training knowledge aggressively. Elon Musk was born in 1971 - he cannot be in 1924. Moon is not made of sapphire. Cities cannot be relocated. Flag ALL physically impossible or historically wrong claims as FALSE.\n\n"
                 "RULES:\n"
                 "- Physically impossible = FALSE (cars flying, fusion reactor in consumer car, Nobel for user manual)\n"
                 "- Wrong dates/names/stats = FALSE\n"
@@ -140,3 +142,5 @@ def correct_claim(claim: str, evidence: str) -> str:
     except Exception as e:
         logger.error(f"Correction failed: {e}")
         return claim
+
+
