@@ -2,21 +2,41 @@
 from config import config
 import json
 
+# Initialize Groq Client
 client = Groq(api_key=config.GROQ_API_KEY)
+
+def extract_claims(text):
+    """
+    Extracts verifiable factual claims from the input text.
+    """
+    prompt = f"""
+    Extract only the verifiable factual claims from the following text.
+    Return the result as a JSON object with a key "claims" containing a list of strings.
+    Text: {text}
+    """
+    try:
+        completion = client.chat.completions.create(
+            model=config.MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}
+        )
+        data = json.loads(completion.choices[0].message.content)
+        return data.get("claims", [])
+    except Exception as e:
+        print(f"Extraction Error: {e}")
+        return []
 
 def verify_claim(claim, evidence):
     """
-    Stricter prompt to ensure the model flags hallucinations correctly.
+    Compares a claim against evidence and returns a verdict.
     """
     prompt = f"""
     As a Fact-Checker, compare the [CLAIM] against the [EVIDENCE].
-    
     [CLAIM]: "{claim}"
     [EVIDENCE]: "{evidence}"
     
-    Determine if the [CLAIM] is supported by the [EVIDENCE].
-    - If the CLAIM is false based on EVIDENCE, mark it as "FALSE".
-    - If the CLAIM is true based on EVIDENCE, mark it as "TRUE".
+    If the CLAIM is contradicted by EVIDENCE, mark it as "FALSE".
+    If the CLAIM is supported by EVIDENCE, mark it as "TRUE".
     
     Return ONLY a JSON object:
     {{
@@ -35,4 +55,21 @@ def verify_claim(claim, evidence):
     except Exception:
         return {"verdict": "ERROR", "confidence": 0, "explanation": "Verification failed"}
 
-# Add extract_claims and correct_claim functions below as per your existing code
+def correct_claim(claim, evidence):
+    """
+    Provides a corrected version of a hallucinated claim.
+    """
+    prompt = f"""
+    Based on the evidence, correct the following false claim.
+    Claim: {claim}
+    Evidence: {evidence}
+    Return only the corrected sentence.
+    """
+    try:
+        completion = client.chat.completions.create(
+            model=config.MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception:
+        return "Correction unavailable."
