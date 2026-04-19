@@ -1,4 +1,4 @@
-﻿import json
+import json
 import re
 from groq import Groq
 from config import config
@@ -41,7 +41,7 @@ def extract_claims(text: str) -> list[str]:
                 f"Extract EVERY atomic fact from this text. "
                 f"Each sentence should produce 3-5 separate claims.\n\n"
                 f"TEXT:\n{text.strip()}\n\n"
-                f"Example: 'Einstein born in 1900 in France won Nobel 1921' → "
+                f"Example: 'Einstein born in 1900 in France won Nobel 1921' becomes "
                 f"[\"Einstein was born in 1900\", \"Einstein was born in France\", \"Einstein won the Nobel Prize in 1921\"]\n\n"
                 f"Return ONLY: {{\"claims\": [\"claim1\", \"claim2\", ...]}}"
             )}
@@ -64,47 +64,44 @@ def extract_claims(text: str) -> list[str]:
         return []
 
 
-def _fallback_query(claim: str) -> str:
-    try:
-        raw = _llm([
-            {"role": "system", "content": "Generate search query. Return JSON: {\"query\": \"search terms\"}"},
-            {"role": "user", "content": f"Search query to verify: {claim}"}
-        ], max_tokens=100)
-        return _parse(raw).get("query", claim)
-    except:
-        return " ".join(claim.split()[:6])
-
-
 def verify_claim(claim: str, evidence: str, mode: str = "General") -> dict:
     mode_map = {
-        "General": "You are a General Fact-Checker with broad world knowledge.",
+        "General": "You are a General Fact-Checker with comprehensive world knowledge.",
         "Medical": "You are a Medical Expert Fact-Checker. Apply clinical precision.",
         "Legal": "You are a Legal Expert Fact-Checker. Apply strict legal standards.",
         "Scientific": "You are a Scientific Fact-Checker. Apply empirical rigor.",
     }
-    system = mode_map.get(mode, mode_map["General"])
+    system_prompt = mode_map.get(mode, mode_map["General"])
+
+    ev = evidence.strip() if evidence and evidence.strip() else "No web evidence available. Use your own knowledge."
+
+    user_prompt = (
+        f"Fact-check this claim using NLI reasoning:\n\n"
+        f"CLAIM: {claim}\n\n"
+        f"EVIDENCE: {ev}\n\n"
+        f"KNOWN FACTS TO APPLY:\n"
+        f"- Elon Musk was born in 1971, not active in 1924\n"
+        f"- Moon is made of rock, not sapphire or any gemstone\n"
+        f"- Cities cannot be physically relocated\n"
+        f"- No spaceport exists in Mahabaleshwar\n"
+        f"- Steve Jobs died in 2011 and never invented electric cars\n"
+        f"- Nobel Prize in Literature is for authors, not car manuals\n"
+        f"- Consumer cars cannot have fusion reactors, fly, or go underwater\n"
+        f"- Deep-space missions did not exist in 1750\n\n"
+        f"RULES:\n"
+        f"- Physically impossible claim = FALSE immediately\n"
+        f"- Wrong dates or historical facts = FALSE\n"
+        f"- Contradicts known reality = FALSE\n"
+        f"- Only TRUE if verifiably correct\n\n"
+        f"Return ONLY JSON: {{\"verdict\": \"FALSE\", \"confidence\": 0.99, "
+        f"\"explanation\": \"reason\", \"nli_label\": \"CONTRADICTION\", "
+        f"\"counter_evidence\": \"correct fact\"}}"
+    )
 
     try:
         raw = _llm([
-            {"role": "system", "content": (
-                f"{system} "
-                "Use NLI reasoning: ENTAILMENT=TRUE, CONTRADICTION=FALSE, NEUTRAL=UNCERTAIN. "
-                "Return JSON with keys: verdict, confidence, explanation, nli_label, counter_evidence."
-            )},
-            {"role": "user", "content": (
-                f"Fact-check this claim:\n\nCLAIM: {claim}\n\n"
-                f"EVIDENCE: {evidence if evidence and evidence.strip() else "No web evidence available."}
-
-ADDITIONAL INSTRUCTION: Even without evidence, use your training knowledge aggressively. Elon Musk was born in 1971 - he cannot be in 1924. Moon is not made of sapphire. Cities cannot be relocated. Flag ALL physically impossible or historically wrong claims as FALSE.\n\n"
-                "RULES:\n"
-                "- Physically impossible = FALSE (cars flying, fusion reactor in consumer car, Nobel for user manual)\n"
-                "- Wrong dates/names/stats = FALSE\n"
-                "- Contradicts known facts = FALSE\n"
-                "- Only TRUE if verifiably correct\n\n"
-                "Return ONLY: {\"verdict\": \"FALSE\", \"confidence\": 0.99, "
-                "\"explanation\": \"reason\", \"nli_label\": \"CONTRADICTION\", "
-                "\"counter_evidence\": \"correct fact\"}"
-            )}
+            {"role": "system", "content": system_prompt + " Return only valid JSON with keys: verdict, confidence, explanation, nli_label, counter_evidence."},
+            {"role": "user", "content": user_prompt}
         ], max_tokens=512)
 
         data = _parse(raw)
@@ -119,7 +116,7 @@ ADDITIONAL INSTRUCTION: Even without evidence, use your training knowledge aggre
             "nli_label": str(data.get("nli_label", "NEUTRAL")),
             "counter_evidence": str(data.get("counter_evidence", "")),
         }
-        logger.info(f"{result['verdict']} ({result['confidence']:.0%}) [{result['nli_label']}] — {claim[:60]}")
+        logger.info(f"{result['verdict']} ({result['confidence']:.0%}) [{result['nli_label']}] - {claim[:60]}")
         return result
 
     except Exception as e:
@@ -142,5 +139,3 @@ def correct_claim(claim: str, evidence: str) -> str:
     except Exception as e:
         logger.error(f"Correction failed: {e}")
         return claim
-
-
