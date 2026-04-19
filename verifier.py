@@ -1,4 +1,4 @@
-﻿import json
+import json
 import re
 from groq import Groq
 from config import config
@@ -6,40 +6,29 @@ from logger import logger
 
 client = Groq(api_key=config.GROQ_API_KEY)
 
-EXTRACTION_SYSTEM = """You are an elite fact-extraction engine. Extract every verifiable factual claim.
-Return ONLY a valid JSON array of strings. No markdown. No explanation.
-NEVER return empty array if text has any facts."""
+EXTRACTION_SYSTEM = """You are an elite fact-extraction engine. Your ONLY job is to extract every verifiable factual claim from input text.
 
-EXTRACTION_USER = """Extract every verifiable factual claim from this text as JSON array.
+RULES:
+- Extract ALL verifiable facts: dates, names, places, statistics, events, records, quantities
+- Each claim must be a single, self-contained, checkable statement
+- Never skip any fact, no matter how small
+- Return ONLY a valid JSON array of strings — no markdown, no explanation, no preamble
+- If text has 1 fact, return array with 1 item. If 10 facts, return 10 items.
+- NEVER return empty array unless input has zero verifiable facts"""
 
-TEXT: {text}
+EXTRACTION_USER = """Extract every single verifiable factual claim from this text as a JSON array.
 
-Return ONLY JSON array like: ["claim 1", "claim 2", "claim 3"]"""
+TEXT:
+{text}
 
-VERIFY_SYSTEM = """You are a world-class fact-checker with deep knowledge of history, science, technology, and current events.
-
-CRITICAL RULES:
-- Use BOTH the provided evidence AND your own knowledge to verify claims
-- If a claim is clearly impossible or absurd (flying cars, liquid nitrogen fuel, Formula 1 won by a hatchback), mark FALSE
-- If claim contradicts basic facts you know, mark FALSE even without evidence
-- Be aggressive in detecting hallucinations — do not give benefit of doubt
-- Confidence must reflect how certain you are
-
-Return ONLY this JSON: {{"verdict": "TRUE" or "FALSE" or "UNCERTAIN", "confidence": 0.0-1.0, "explanation": "one sentence"}}"""
-
-VERIFY_USER = """Fact-check this claim using evidence AND your knowledge.
-
-CLAIM: {claim}
-
-EVIDENCE FROM WEB: {evidence}
-
-IMPORTANT: If the claim is physically impossible, historically wrong, or clearly absurd — mark it FALSE regardless of evidence.
-Return ONLY JSON: {{"verdict": "TRUE" or "FALSE" or "UNCERTAIN", "confidence": 0.0-1.0, "explanation": "one sentence"}}"""
+Return ONLY the JSON array. Example format:
+["The 2024 ICC T20 World Cup was hosted by the United States", "India defeated South Africa in the final", "Jasprit Bumrah was player of the tournament"]"""
 
 
 def extract_claims(text: str) -> list[str]:
     if not text or not text.strip():
         return []
+
     try:
         response = client.chat.completions.create(
             model=config.GROQ_MODEL,
@@ -51,20 +40,56 @@ def extract_claims(text: str) -> list[str]:
             max_tokens=2048,
         )
         raw = response.choices[0].message.content.strip()
-        raw = re.sub(r"`(?:json)?", "", raw).strip()
+        logger.info(f"Raw extraction response: {raw[:200]}")
+
+        # Strip markdown fences
+        raw = re.sub(r"```(?:json)?", "", raw).strip()
+
+        # Find JSON array boundaries
         start = raw.find("[")
         end = raw.rfind("]") + 1
+
         if start == -1 or end == 0:
+            logger.warning("No JSON array found. Attempting line-by-line parse.")
             lines = [l.strip().strip('"-,') for l in raw.split("\n") if l.strip().strip('"-,')]
             claims = [l for l in lines if len(l) > 10]
         else:
             claims = json.loads(raw[start:end])
+
         claims = [c.strip() for c in claims if isinstance(c, str) and len(c.strip()) > 5]
         logger.info(f"Extracted {len(claims)} claims.")
         return claims[:config.MAX_CLAIMS_PER_TEXT]
+
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON parse failed: {e}. Raw: {raw[:300]}")
+        # Fallback: regex extract quoted strings
+        fallback = re.findall(r'"([^"]{10,})"', raw)
+        logger.info(f"Fallback extracted {len(fallback)} claims.")
+        return fallback[:config.MAX_CLAIMS_PER_TEXT]
     except Exception as e:
-        logger.error(f"Extraction failed: {e}")
+        logger.error(f"Claim extraction failed: {e}")
         return []
+
+
+VERIFY_SYSTEM = """You are a world-class fact-checker with access to provided evidence.
+
+RULES:
+- Verdict must be exactly: TRUE, FALSE, or UNCERTAIN
+- TRUE: claim fully supported by evidence
+- FALSE: claim contradicted by evidence  
+- UNCERTAIN: evidence insufficient to confirm or deny
+- Confidence: 0.0 (no confidence) to 1.0 (absolute certainty)
+- Return ONLY valid JSON, no markdown, no preamble"""
+
+VERIFY_USER = """Fact-check this claim against the evidence.
+
+CLAIM: {claim}
+
+EVIDENCE:
+{evidence}
+
+Return ONLY this exact JSON:
+{{"verdict": "TRUE" or "FALSE" or "UNCERTAIN", "confidence": 0.85, "explanation": "One sentence explaining the verdict based on evidence."}}"""
 
 
 def verify_claim(claim: str, evidence: str) -> dict:
@@ -73,31 +98,47 @@ def verify_claim(claim: str, evidence: str) -> dict:
             model=config.GROQ_MODEL,
             messages=[
                 {"role": "system", "content": VERIFY_SYSTEM},
-                {"role": "user", "content": VERIFY_USER.format(
-                    claim=claim,
-                    evidence=evidence if evidence else "No web evidence found. Use your own knowledge."
-                )}
+                {"role": "user", "content": VERIFY_USER.format(claim=claim, evidence=evidence or "No evidence found.")}
             ],
             temperature=0.0,
             max_tokens=512,
         )
         raw = response.choices[0].message.content.strip()
-        raw = re.sub(r"`(?:json)?", "", raw).strip()
+        raw = re.sub(r"```(?:json)?", "", raw).strip()
         start = raw.find("{")
         end = raw.rfind("}") + 1
+
         if start == -1 or end == 0:
-            raise ValueError("No JSON found")
+            raise ValueError("No JSON object in response")
+
         result = json.loads(raw[start:end])
+
+        # Validate + normalize
         result["verdict"] = result.get("verdict", "UNCERTAIN").upper()
         if result["verdict"] not in ("TRUE", "FALSE", "UNCERTAIN"):
             result["verdict"] = "UNCERTAIN"
         result["confidence"] = float(result.get("confidence", 0.5))
-        result["explanation"] = result.get("explanation", "")
+        result["explanation"] = result.get("explanation", "No explanation provided.")
+
         logger.info(f"Verdict: {result['verdict']} | Confidence: {result['confidence']:.2f}")
         return result
+
     except Exception as e:
         logger.error(f"Verification failed: {e}")
-        return {"verdict": "UNCERTAIN", "confidence": 0.0, "explanation": str(e)}
+        return {"verdict": "UNCERTAIN", "confidence": 0.0, "explanation": f"Verification error: {str(e)}"}
+
+
+CORRECT_SYSTEM = """You are a precise fact-corrector. Rewrite false claims using only evidence provided.
+Return ONLY the corrected factual statement — no explanation, no prefix, no quotes."""
+
+CORRECT_USER = """Rewrite this false claim as a correct factual statement using the evidence below.
+
+FALSE CLAIM: {claim}
+
+EVIDENCE:
+{evidence}
+
+Return ONLY the corrected statement."""
 
 
 def correct_claim(claim: str, evidence: str) -> str:
@@ -105,13 +146,15 @@ def correct_claim(claim: str, evidence: str) -> str:
         response = client.chat.completions.create(
             model=config.GROQ_MODEL,
             messages=[
-                {"role": "system", "content": "Rewrite false claims as correct factual statements. Return ONLY the corrected statement, nothing else."},
-                {"role": "user", "content": f"False claim: {claim}\nEvidence: {evidence or 'Use your knowledge.'}\nReturn ONLY the corrected statement."}
+                {"role": "system", "content": CORRECT_SYSTEM},
+                {"role": "user", "content": CORRECT_USER.format(claim=claim, evidence=evidence or "No evidence available.")}
             ],
             temperature=0.0,
             max_tokens=256,
         )
-        return response.choices[0].message.content.strip().strip('"')
+        corrected = response.choices[0].message.content.strip().strip('"')
+        logger.info(f"Corrected: {corrected[:100]}")
+        return corrected
     except Exception as e:
         logger.error(f"Correction failed: {e}")
         return claim
